@@ -45,12 +45,12 @@
 """
 
 import os
+import io
 import re
 import time
 import queue
 import socket
 import hashlib
-import tempfile
 import threading
 import subprocess
 from enum import Enum
@@ -92,14 +92,46 @@ MAX_TOKENS  = 200
 
 # ── VAD tuning ─────────────────────────────────────────────
 ENERGY_THRESHOLD     = 0.10
-SILENCE_AFTER_SPEECH = 1.2   # seconds of silence → end of the whole turn
-SENTENCE_PAUSE       = 0.45  # seconds of silence → mid-turn "sentence" break
+# Was 1.2s. Every turn pays this in full before STT even starts, so it is
+# one of the biggest single latency knobs. 0.8s is a common sweet spot for
+# conversational assistants -- if users start getting cut off mid-thought,
+# raise it back up in 0.1s steps; if RoboBot still feels slow to react and
+# nobody is getting cut off, it can go a little lower (try 0.6-0.7s).
+SILENCE_AFTER_SPEECH = 0.8
+# Was 0.45s. Governs how quickly a mid-turn chunk gets shipped to Whisper
+# in the background. Lower = STT gets a head start sooner, at the cost of
+# slightly choppier segment boundaries. 0.35s tested fine; recalibrate if
+# segments start splitting mid-word too often.
+SENTENCE_PAUSE       = 0.35
+# Adaptive silence detection: once at least one mid-turn segment has
+# already been flushed to the STT pool (see `any_mid_flush` below), the
+# background transcription for the bulk of the utterance has a head
+# start, so we don't need to wait as long to conclude the turn -- only
+# the short trailing remainder is still on the critical path.
+SILENCE_AFTER_SPEECH_FOLLOWUP = 0.6
 PRE_ROLL_CHUNKS      = 6
 MIN_SPEECH_SECS      = 0.5
 CHUNK_SECS           = 0.1
 
 IDLE_TIMEOUT      = 10.0
 IDLE_POLL_TIMEOUT = 30.0
+
+# ── Perf / debug toggles ───────────────────────────────────
+# Print the per-turn latency breakdown (Speech End → STT → GPT First
+# Token → Sentence Complete → TTS Start → Playback Started → Total).
+# Safe to leave on in production; it's just terminal output.
+PRINT_LATENCY_TIMINGS = True
+# Stream the FIRST spoken sentence of every turn straight into `mpg123`'s
+# stdin as edge-tts produces it, instead of waiting for the whole
+# sentence to finish synthesising before playback starts. This is the
+# single biggest win for "time to first sound" because every later
+# sentence already overlaps its synthesis with the previous sentence's
+# playback (see StreamingSpeaker) -- only sentence #1 has nothing to
+# overlap with. Requires `mpg123` (sudo apt install mpg123). If it's
+# missing, or streaming fails for any reason, RoboBot automatically
+# falls back to the original synth-then-play path, so this is safe to
+# leave on even if mpg123 isn't installed yet.
+STREAM_TTS_PLAYBACK = True
 
 WAKE_WORDS = ["hello", "hey"]
 
@@ -130,6 +162,53 @@ MSG_TRY_AGAIN   = "Please try again."
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+# ──────────────────────────────────────────────
+#  LATENCY INSTRUMENTATION
+# ──────────────────────────────────────────────
+# One shared dict per turn: speech_end → stt_complete → gpt_start →
+# gpt_first_token → first_sentence → tts_start → playback_start.
+# Reset at the start of every real (non-idle) listening turn.
+TURN_TIMINGS: dict = {}
+
+
+def _reset_timings():
+    TURN_TIMINGS.clear()
+
+
+def _mark(stage: str):
+    if stage not in TURN_TIMINGS:   # first write wins (e.g. first token, first sentence)
+        TURN_TIMINGS[stage] = time.time()
+
+
+def print_turn_timings():
+    """Prints the requested per-turn latency breakdown, skipping any stage
+    that didn't fire this turn (e.g. GPT stages on a reply-cache hit)."""
+    t = TURN_TIMINGS
+    if "speech_end" not in t:
+        return
+
+    def gap(a, b):
+        return int((t[b] - t[a]) * 1000) if a in t and b in t else None
+
+    rows = [
+        ("Speech End",         0),
+        ("STT",                gap("speech_end", "stt_complete")),
+        ("GPT First Token",    gap("gpt_start", "gpt_first_token")),
+        ("Sentence Complete",  gap("gpt_first_token", "first_sentence")),
+        ("TTS Start",          gap("first_sentence", "tts_start")),
+        ("Playback Started",   gap("tts_start", "playback_start")),
+    ]
+
+    print("\n   ── Latency breakdown ──────────────")
+    for label, ms in rows:
+        shown = f"{ms} ms" if ms is not None else "n/a (skipped this turn)"
+        print(f"   {label:<20} {shown}")
+    if "playback_start" in t:
+        total = int((t["playback_start"] - t["speech_end"]) * 1000)
+        print(f"   {'Total Latency':<20} {total} ms")
+    print("   ────────────────────────────────────\n")
+
 
 # ──────────────────────────────────────────────
 #  STATE
@@ -171,6 +250,12 @@ history: dict = {"en": [], "hi": []}
 
 # Exact-match reply cache: skips the LLM entirely for a repeated question.
 reply_cache: dict = {}
+
+# In-memory (voice, text) → path cache in front of the on-disk audio cache.
+# The disk cache still does the heavy lifting (survives restarts), this
+# just avoids a redundant os.path.exists() stat() call for phrases that
+# repeat often within one run (greetings, idle prompts, common replies).
+_session_audio_cache: dict = {}
 
 pygame.mixer.init()
 
@@ -251,14 +336,21 @@ def synthesize(text: str, voice: str) -> str:
     so any phrase — greetings, idle prompts, or a repeated LLM sentence —
     is only ever sent to edge-tts once.
     """
+    session_key = (voice, text)
+    cached = _session_audio_cache.get(session_key)
+    if cached:
+        return cached
+
     path = _cache_path(text, voice)
     if os.path.exists(path):
+        _session_audio_cache[session_key] = path
         return path
 
     import asyncio
     tmp_path = path + ".tmp"
     asyncio.run(_tts_to_file(text, tmp_path, voice))
     os.replace(tmp_path, path)
+    _session_audio_cache[session_key] = path
     return path
 
 
@@ -284,6 +376,82 @@ def pick_voice(text: str, lang: str) -> str:
     return TTS_VOICE_EN
 
 
+async def _tts_stream_to_mpg123(text: str, voice: str, tmp_path: str):
+    """
+    Streams edge-tts audio chunks straight into `mpg123`'s stdin as they
+    arrive, AND writes the same bytes to `tmp_path` so the normal disk
+    cache still gets populated exactly as before. Raises on any problem
+    (mpg123 missing, stream error, ...) — caller is responsible for
+    falling back to the non-streaming path.
+    """
+    proc = subprocess.Popen(
+        ["mpg123", "-q", "-"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    first_chunk = True
+    try:
+        with open(tmp_path, "wb") as f:
+            communicate = edge_tts.Communicate(text, voice=voice)
+            async for chunk in communicate.stream():
+                if chunk.get("type") != "audio":
+                    continue
+                data = chunk["data"]
+                f.write(data)
+                proc.stdin.write(data)
+                if first_chunk:
+                    proc.stdin.flush()
+                    _mark("playback_start")   # audio is now reaching the speaker
+                    first_chunk = False
+    finally:
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        proc.wait()
+
+    if first_chunk:
+        # No audio chunks at all — treat as a failure so the caller falls back.
+        raise RuntimeError("edge-tts produced no audio chunks")
+
+
+def _synth_and_play_streaming(text: str, voice: str):
+    """
+    Used ONLY for the first spoken sentence of a turn (see StreamingSpeaker).
+    Starts audio playing as soon as the first chunk of synthesised speech
+    exists, instead of waiting for the whole sentence to finish. Falls back
+    to the plain synthesize()+play() path if mpg123 isn't installed or
+    streaming fails for any other reason — never worse than the original
+    behaviour, just not faster.
+    """
+    _mark("tts_start")
+
+    session_key = (voice, text)
+    cached = _session_audio_cache.get(session_key) or (
+        _cache_path(text, voice) if os.path.exists(_cache_path(text, voice)) else None
+    )
+    if cached:
+        # Already synthesised in a previous run/turn — nothing to stream.
+        _mark("playback_start")
+        play(cached)
+        _session_audio_cache[session_key] = cached
+        return
+
+    path = _cache_path(text, voice)
+    tmp_path = path + ".tmp"
+    try:
+        import asyncio
+        asyncio.run(_tts_stream_to_mpg123(text, voice, tmp_path))
+        os.replace(tmp_path, path)
+        _session_audio_cache[session_key] = path
+    except Exception as e:
+        print(f"   ⚠️  streaming TTS playback unavailable ({e}) — falling back to normal playback")
+        p = synthesize(text, voice)
+        _mark("playback_start")
+        play(p)
+
+
 # ──────────────────────────────────────────────
 #  STREAMING SPEAK  — plays sentences as they arrive (feature 1, output half)
 # ──────────────────────────────────────────────
@@ -301,14 +469,22 @@ class StreamingSpeaker:
         self._thread = threading.Thread(target=self._consume, daemon=True)
         self._thread.start()
         self._announced = False
+        self._sentence_index = 0
 
     def _consume(self):
         while True:
-            future = self._q.get()
-            if future is None:
+            item = self._q.get()
+            if item is None:
                 break
-            path = future.result()
-            play(path)
+            mode, future = item
+            if mode == "sync":
+                # Streaming path already played the audio itself inside the
+                # worker thread — just block here until it's actually done,
+                # so sentence order is still preserved.
+                future.result()
+            else:
+                path = future.result()
+                play(path)
 
     def say(self, sentence: str):
         sentence = sentence.strip()
@@ -319,8 +495,19 @@ class StreamingSpeaker:
             self._announced = True
         print(f"   💬 {sentence}")
         voice = pick_voice(sentence, self.lang)
-        future = tts_executor.submit(synthesize, sentence, voice)
-        self._q.put(future)
+        self._sentence_index += 1
+
+        if STREAM_TTS_PLAYBACK and self._sentence_index == 1:
+            # Only sentence #1: every later sentence already overlaps its
+            # synthesis with the previous sentence's playback below, so
+            # streaming only matters for the one sentence with nothing to
+            # overlap with. Ordering stays safe because this future does
+            # its own playback synchronously — the consumer just waits on it.
+            future = tts_executor.submit(_synth_and_play_streaming, sentence, voice)
+            self._q.put(("sync", future))
+        else:
+            future = tts_executor.submit(synthesize, sentence, voice)
+            self._q.put(("play", future))
 
     def finish(self):
         self._q.put(None)
@@ -342,20 +529,22 @@ def speak_blocking(text: str, lang: str = "en"):
 # ──────────────────────────────────────────────
 
 def transcribe_segment(audio: np.ndarray) -> Tuple[str, str]:
-    """Whisper call for a single audio segment. Returns (text, lang)."""
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp_path = tmp.name
-    sf.write(tmp_path, audio, SAMPLE_RATE)
+    """Whisper call for a single audio segment. Returns (text, lang).
 
-    try:
-        with open(tmp_path, "rb") as f:
-            result = client.audio.transcriptions.create(
-                model=STT_MODEL,
-                file=f,
-                response_format="verbose_json",
-            )
-    finally:
-        os.unlink(tmp_path)
+    Writes the WAV to an in-memory buffer instead of a temp file on disk —
+    avoids a file create + write + unlink round trip (and SD-card wear on
+    a Raspberry Pi) on every segment, background or trailing.
+    """
+    buf = io.BytesIO()
+    sf.write(buf, audio, SAMPLE_RATE, format="WAV")
+    buf.seek(0)
+    buf.name = "segment.wav"   # SDK uses this for the upload filename
+
+    result = client.audio.transcriptions.create(
+        model=STT_MODEL,
+        file=buf,
+        response_format="verbose_json",
+    )
 
     text = (result.text or "").strip()
     lang = (result.language or "en").strip().lower()
@@ -373,15 +562,22 @@ def transcribe_segment(audio: np.ndarray) -> Tuple[str, str]:
     return text, lang
 
 
-def capture_and_transcribe(timeout: float) -> Tuple[Optional[str], str]:
+def capture_and_transcribe(timeout: float, track_timing: bool = False) -> Tuple[Optional[str], str]:
     """
     Records one full user turn via VAD. Whenever a short mid-turn pause
     (SENTENCE_PAUSE) is detected, the audio collected so far is sent off
     for transcription in the background immediately — while the user is
     still talking — instead of waiting for the whole turn to end.
 
+    `track_timing=True` resets and records the per-turn latency dict used
+    by print_turn_timings() — only set for real listening turns, not idle
+    wake-word polling.
+
     Returns (combined_text_or_None, lang).
     """
+    if track_timing:
+        _reset_timings()
+
     audio_q   = queue.Queue()
     blocksize = int(SAMPLE_RATE * CHUNK_SECS)
 
@@ -399,6 +595,7 @@ def capture_and_transcribe(timeout: float) -> Tuple[Optional[str], str]:
     recording = False
     silence_start: Optional[float] = None
     segment_split_done = False
+    any_mid_flush = False   # True once ≥1 background segment has been sent for STT
     idle_clock = time.time()
     futures: List = []
 
@@ -440,10 +637,14 @@ def capture_and_transcribe(timeout: float) -> Tuple[Optional[str], str]:
                     silence_start = time.time()
                     continue
                 elapsed = time.time() - silence_start
-                if elapsed >= SILENCE_AFTER_SPEECH:
+                required_silence = SILENCE_AFTER_SPEECH_FOLLOWUP if any_mid_flush else SILENCE_AFTER_SPEECH
+                if elapsed >= required_silence:
+                    if track_timing:
+                        _mark("speech_end")
                     break  # end of the whole turn
                 if elapsed >= SENTENCE_PAUSE and not segment_split_done:
                     segment_split_done = True
+                    any_mid_flush = True
                     flush_segment()
 
             else:
@@ -472,6 +673,9 @@ def capture_and_transcribe(timeout: float) -> Tuple[Optional[str], str]:
         if text:
             pieces.append(text)
             lang = seg_lang  # last non-empty segment's script-scan wins
+
+    if track_timing:
+        _mark("stt_complete")
 
     combined = " ".join(p for p in pieces if p.strip()).strip()
 
@@ -530,6 +734,7 @@ def stream_ai_reply_and_speak(user_text: str, lang: str) -> str:
     lang_history.append({"role": "user", "content": user_text})
     messages = [{"role": "system", "content": system}, *lang_history]
 
+    _mark("gpt_start")
     stream = client.chat.completions.create(
         model=CHAT_MODEL,
         messages=messages,
@@ -545,16 +750,19 @@ def stream_ai_reply_and_speak(user_text: str, lang: str) -> str:
         delta = chunk.choices[0].delta.content or ""
         if not delta:                     # feature 4 — skip empty deltas
             continue
+        _mark("gpt_first_token")
         buffer += delta
         full_reply += delta
 
         parts = SENTENCE_SPLIT_RE.split(buffer)
         if len(parts) > 1:
+            _mark("first_sentence")
             for sentence in parts[:-1]:
                 speaker.say(sentence)
             buffer = parts[-1]
 
     if buffer.strip():
+        _mark("first_sentence")   # covers single-sentence replies too
         speaker.say(buffer)
 
     speaker.finish()
@@ -597,7 +805,7 @@ def main():
 
     try:
         speak_blocking(
-            "Hello, mein RoboBot hoon, mein aapki kese madad kar sakta hoon, "
+            "Hello, mein RoboBot hoon . main aapki kese madad kar sakta hoon. "
             "Krapya apna sawaal poochhiye .",
             lang="hi",
         )
@@ -635,7 +843,7 @@ def main():
             if state == State.LISTENING:
                 show_state(state, f"— silence for {int(IDLE_TIMEOUT)}s → idle")
                 try:
-                    user_text, lang = capture_and_transcribe(timeout=IDLE_TIMEOUT)
+                    user_text, lang = capture_and_transcribe(timeout=IDLE_TIMEOUT, track_timing=True)
                 except Exception as e:
                     handle_error(e, "listening / transcription")
                     continue
@@ -670,6 +878,8 @@ def main():
                     handle_error(e, "LLM reply / speech synthesis")
                     state = State.LISTENING
                     continue
+                if PRINT_LATENCY_TIMINGS:
+                    print_turn_timings()
                 state = State.LISTENING
                 continue
 
