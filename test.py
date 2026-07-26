@@ -142,6 +142,9 @@ SYSTEM_EN = (
     "you are created by Robotwala."
     "dont use bullet points."
     "answer only in 2 to 3 sentences"
+    "If the user's language is Hindi, always respond in Hindi written in Devanagari script, "
+    "even if the user's input is written in Urdu (Perso-Arabic) script or Roman Hindi."
+    "Never respond in the Urdu script."
 )
 
 SYSTEM_HI = (
@@ -151,6 +154,7 @@ SYSTEM_HI = (
     "tumhein robotwala ne banaya hein."
     "bullet points ka use nahi karna he."
     "sirf 2 se 3 sentence me jawab dena he"
+    "Agar user ki language Hindi hai, to hamesha Hindi mein sirf Devanagari script ka use karke ""reply do. Agar user Hindi ko Roman Hindi ya Urdu (Perso-Arabic) script mein likhe, tab bhi ""hamesha Hindi ki Devanagari script mein hi jawab do. Kabhi bhi Urdu (Perso-Arabic) script ""mein reply mat dena."
 )
 
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?।\n])\s+")
@@ -240,7 +244,7 @@ def show_state(state: State, note: str = ""):
 #  SETUP
 # ──────────────────────────────────────────────
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY, timeout=15.0, max_retries=1)
 
 # Separate history per language so the model never sees cross-language
 # context and stays in the right language naturally. Kept as a STABLE
