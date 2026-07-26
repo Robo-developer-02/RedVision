@@ -97,7 +97,7 @@ ENERGY_THRESHOLD     = 0.10
 # conversational assistants -- if users start getting cut off mid-thought,
 # raise it back up in 0.1s steps; if RoboBot still feels slow to react and
 # nobody is getting cut off, it can go a little lower (try 0.6-0.7s).
-SILENCE_AFTER_SPEECH = 0.8
+SILENCE_AFTER_SPEECH = 1.0
 # Was 0.45s. Governs how quickly a mid-turn chunk gets shipped to Whisper
 # in the background. Lower = STT gets a head start sooner, at the cost of
 # slightly choppier segment boundaries. 0.35s tested fine; recalibrate if
