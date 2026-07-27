@@ -1,20 +1,18 @@
-# Robot Controller
+# 🤖 Robot Controller
 
-A Raspberry Pi based robot controller that provides a simple terminal menu to launch either an AI Voice Chatbot or an Audio Player. The project is designed to be controlled remotely over SSH using the Termux application on Android.
+A Raspberry Pi based robot controller that provides a simple terminal interface to launch either an AI Voice Chatbot or an Audio Player. The entire project is designed to be operated remotely over SSH (using applications like Termux) and runs inside a dedicated Python virtual environment.
 
 ---
 
-## Features
+# Features
 
-### Robot Controller (Launcher)
+## Robot Controller (Launcher)
 
-- Interactive terminal menu.
-- Automatically launches after SSH login.
-- Runs inside the project's Python virtual environment.
-- Returns to the main menu after the selected program exits.
-- Beginner-friendly and lightweight implementation.
-
-Menu:
+- Simple terminal-based menu
+- Automatically starts after SSH login
+- Launches the AI Chatbot or Audio Player
+- Returns to the launcher after exiting either application
+- Lightweight and beginner-friendly implementation
 
 ```
 =================================
@@ -28,41 +26,92 @@ Menu:
 
 ---
 
-## AI Voice Chatbot
+# AI Voice Chatbot
 
-The chatbot is a voice-based conversational assistant developed for Raspberry Pi.
+The chatbot is a real-time speech-to-speech conversational assistant designed for Raspberry Pi.
 
-### Features
+## Features
 
-- Speech-to-Text (STT)
-- Text-to-Speech (TTS)
-- Natural language conversations
-- Supports voice interaction
-- Runs completely from the terminal
-- Uses the project's virtual environment
-- Returns to the launcher when the chatbot exits
+### Speech Processing
 
-Chatbot file:
+- OpenAI Whisper Speech-to-Text
+- Microsoft Edge Neural Text-to-Speech
+- Offline speech fallback using espeak
+- Continuous voice conversation
+- Wake-word activation
+- Automatic silence detection
+
+### AI
+
+- GPT-4o powered conversations
+- Streaming AI responses
+- Short conversational replies
+- English and Hindi support
+- Automatic language detection
+- Separate conversation history for each language
+
+### Performance Optimizations
+
+- Streaming Speech-to-Text
+- Streaming GPT output
+- Streaming Text-to-Speech playback
+- Prompt caching
+- Audio caching
+- Background transcription
+- Background speech synthesis
+- Low latency response pipeline
+
+### Error Handling
+
+- Internet connectivity detection
+- OpenAI API error handling
+- Offline fallback speech
+- Automatic recovery from errors
+
+### State Machine
 
 ```
-test.py
+             Hello / Hey
+                 │
+                 ▼
+           LISTENING
+                 │
+                 ▼
+           THINKING
+                 │
+                 ▼
+            SPEAKING
+                 │
+                 ▼
+           LISTENING
+
+      10 seconds silence
+                 │
+                 ▼
+               IDLE
+                 │
+       Say "Hello" again
+                 │
+                 └────────► LISTENING
 ```
 
 ---
 
-## Audio Player
+# Audio Player
 
-The audio player is a lightweight command-line application for playing pre-recorded audio announcements.
+A lightweight command-line audio player that plays pre-recorded announcements using VLC.
 
-### Features
+## Features
 
 - Plays `.m4a` audio files
-- Speaker output only (no microphone access)
-- Controlled directly from the terminal
-- Simple command-based interface
-- Easy to extend by adding more audio files
+- Uses VLC backend
+- Speaker output only
+- Never accesses the microphone
+- Non-blocking playback
+- Stop playback anytime
+- Easily extendable with additional audio files
 
-Supported commands:
+Supported Commands
 
 ```
 1
@@ -74,7 +123,7 @@ STOP
 EXIT
 ```
 
-Example:
+Example
 
 ```
 Command > 1
@@ -84,86 +133,163 @@ Playing: welcome.m4a
 Playback Finished.
 ```
 
-Audio Player location:
-
-```
-audio_player/
-```
-
 ---
 
-## Project Structure
+# Project Structure
 
 ```
 CHATBOT/
 │
 ├── launcher.py
 ├── test.py
+├── README.md
+├── requirements.txt
+├── .env
+│
+├── tts_cache/
 │
 ├── audio_player/
 │   ├── audio_player.py
-│   ├── requirements.txt
 │   └── audio/
 │       ├── welcome.m4a
 │       ├── intro.m4a
 │       ├── announcement.m4a
 │       └── goodbye.m4a
 │
-├── venv/
-└── README.md
+└── venv/
 ```
 
 ---
 
-## Virtual Environment
+# Technologies Used
 
-The project uses its own Python virtual environment.
-
-Location:
-
-```
-/home/lucy/Desktop/CHATBOT/venv
-```
-
-All programs launched through `launcher.py` automatically use this virtual environment.
+| Component | Technology |
+|------------|------------|
+| Programming Language | Python 3 |
+| Hardware | Raspberry Pi 4 |
+| Speech Recognition | OpenAI Whisper |
+| AI Model | GPT-4o |
+| Text-to-Speech | Microsoft Edge TTS |
+| Offline Speech | espeak |
+| Audio Playback | pygame |
+| Announcement Playback | VLC |
+| Audio Streaming | mpg123 |
+| Audio Input | sounddevice |
+| Audio Processing | soundfile |
+| Environment Variables | python-dotenv |
+| SSH Access | OpenSSH |
+| Remote Terminal | Termux |
 
 ---
 
-## Running the Project
+# Python Requirements
 
-SSH into the Raspberry Pi:
+Install the required Python packages inside your virtual environment.
 
 ```bash
-ssh lucy@<RaspberryPi-IP>
+python3 -m venv venv
+
+source venv/bin/activate
+
+pip install --upgrade pip
+
+pip install \
+openai \
+numpy \
+sounddevice \
+soundfile \
+edge-tts \
+pygame \
+python-dotenv \
+python-vlc
 ```
 
-After login, the Robot Controller menu starts automatically.
+Or simply install everything using
 
-Choose:
-
+```bash
+pip install -r requirements.txt
 ```
-0 -> AI Voice Chatbot
-```
-
-or
-
-```
-1 -> Audio Player
-```
-
-When either program exits, control returns to the launcher menu.
 
 ---
 
-## Audio Files
+# requirements.txt
 
-Store all announcement files inside:
+```
+edge-tts
+numpy
+openai
+pygame
+python-dotenv
+python-vlc
+sounddevice
+soundfile
+```
+
+---
+
+# System Dependencies
+
+Install the required Linux packages.
+
+```bash
+sudo apt update
+
+sudo apt install \
+python3-dev \
+portaudio19-dev \
+libportaudio2 \
+ffmpeg \
+espeak \
+mpg123 \
+vlc \
+libvlc-dev
+```
+
+---
+
+# Environment Variables
+
+Create a `.env` file in the project directory.
+
+```
+OPENAI_API_KEY=your_openai_api_key
+```
+
+---
+
+# Running the Project
+
+Activate the virtual environment
+
+```bash
+source venv/bin/activate
+```
+
+Run the launcher
+
+```bash
+python launcher.py
+```
+
+Or, if configured, simply SSH into the Raspberry Pi.
+
+```bash
+ssh <username>@<raspberry-pi-ip>
+```
+
+The Robot Controller menu will automatically appear.
+
+---
+
+# Audio Files
+
+Store all announcement files inside
 
 ```
 audio_player/audio/
 ```
 
-Example:
+Example
 
 ```
 audio/
@@ -173,12 +299,12 @@ audio/
 └── goodbye.m4a
 ```
 
-To add a new announcement:
+To add a new announcement
 
-1. Copy the `.m4a` file into the `audio` folder.
+1. Copy the audio file into the `audio` directory.
 2. Add a new command inside `audio_player.py`.
 
-Example:
+Example
 
 ```python
 elif command == "5":
@@ -187,26 +313,39 @@ elif command == "5":
 
 ---
 
-## Technologies Used
+# Audio Pipeline
 
-- Python 3
-- Raspberry Pi OS
-- SSH
-- Termux
-- Virtual Environment (venv)
-- Speech-to-Text
-- Text-to-Speech
-- VLC (Audio Playback)
+```
+Microphone
+      │
+      ▼
+SoundDevice
+      │
+      ▼
+OpenAI Whisper
+      │
+      ▼
+GPT-4o
+      │
+      ▼
+Microsoft Edge TTS
+      │
+      ▼
+pygame
+      │
+      ▼
+Speaker
+```
 
 ---
 
-## Workflow
+# Launcher Workflow
 
 ```
 Raspberry Pi Boot
         │
         ▼
-SSH Login (Termux)
+SSH Login
         │
         ▼
 launcher.py
@@ -222,21 +361,42 @@ launcher.py
 
 ---
 
-## Notes
+# Notes
 
-- The launcher always uses the project's virtual environment.
-- The chatbot and audio player are completely independent applications.
-- The audio player never accesses the microphone.
-- The chatbot and audio player are never run simultaneously.
-- All interaction is performed through an SSH terminal.
+- Built specifically for Raspberry Pi.
+- Runs entirely from the terminal.
+- Chatbot and Audio Player are independent applications.
+- Only one application runs at a time.
+- Audio Player never accesses the microphone.
+- Chatbot automatically switches between English and Hindi.
+- Uses streaming responses for lower latency.
+- Includes prompt and audio caching for improved performance.
+- Gracefully handles network failures and API errors.
 
 ---
 
-## Future Improvements
+# Future Improvements
 
-- GPIO control integration
-- Robot movement commands
-- Camera integration
-- Remote command interface
-- Autonomous operating modes
-- Additional audio announcements
+- GPIO robot movement
+- ESP32 integration
+- Camera support
+- Face recognition
+- Object detection
+- Autonomous navigation
+- ROS integration
+- Battery monitoring
+- Web dashboard
+- Multi-language support
+- Robot arm control
+
+---
+
+# License
+
+This project is intended for educational, research, and robotics development purposes.
+
+---
+
+# Author
+
+Developed by **Robotwala**
