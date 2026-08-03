@@ -63,6 +63,7 @@ import sounddevice as sd
 import soundfile as sf
 import edge_tts
 import pygame
+import requests
 from dotenv import load_dotenv
 
 from openai import (
@@ -80,8 +81,13 @@ load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+NYLA_AUTH_URL       = os.getenv("NYLA_AUTH_URL", "http://ai.salesninjacrm.com/org/auth-robot")
+NYLA_ASK_URL        = os.getenv("NYLA_ASK_URL", "http://ai.salesninjacrm.com/nyla-report/ask")
+NYLA_API_KEY        = os.getenv("NYLA_API_KEY")
+NYLA_ENCRYPTED_DATA = os.getenv("NYLA_ENCRYPTED_DATA")
+
 STT_MODEL  = "whisper-1"
-CHAT_MODEL = "gpt-4o"
+CHAT_MODEL = "gpt-4o"   # unused for chat — replies come from Nyla /ask; Whisper still uses OpenAI.
 
 TTS_VOICE_EN = "en-US-JennyNeural"
 TTS_VOICE_HI = "hi-IN-SwaraNeural"
@@ -135,6 +141,9 @@ STREAM_TTS_PLAYBACK = True
 
 WAKE_WORDS = ["hello", "hey"]
 
+# NOTE: SYSTEM_EN / SYSTEM_HI / MAX_TOKENS are no longer used now that
+# Nyla handles all chat replies (Nyla has its own persona/behavior
+# server-side). Left in place in case you ever want a GPT-4o fallback.
 SYSTEM_EN = (
     "Your name is RoboBot. You are the helpful AI assistant . "
     "Keep responses concise and conversational."
@@ -314,7 +323,7 @@ def handle_error(e: Exception, where: str):
         speak_offline(MSG_NO_INTERNET)
         return
 
-    if isinstance(e, APIError):
+    if isinstance(e, (APIError, requests.RequestException, RuntimeError)):
         speak_offline(MSG_NO_SERVER)
         return
 
@@ -698,6 +707,75 @@ def capture_and_transcribe(timeout: float, track_timing: bool = False) -> Tuple[
 
 
 # ──────────────────────────────────────────────
+#  NYLA REPORT API — auth-robot + /ask
+# ──────────────────────────────────────────────
+
+class NylaClient:
+    """JWT via /org/auth-robot at startup; /nyla-report/ask for each question."""
+
+    def __init__(self):
+        self._token: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def _require_credentials(self) -> None:
+        if not NYLA_API_KEY or not NYLA_ENCRYPTED_DATA:
+            raise RuntimeError(
+                "Missing NYLA_API_KEY or NYLA_ENCRYPTED_DATA in .env — "
+                "required for /org/auth-robot"
+            )
+
+    def _fetch_token(self, new_chat: str) -> str:
+        self._require_credentials()
+        resp = requests.post(
+            NYLA_AUTH_URL,
+            data={
+                "encrypted_data": NYLA_ENCRYPTED_DATA,
+                "api_key": NYLA_API_KEY,
+                "new_chat": new_chat,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.text.strip().strip('"')
+
+    def authenticate(self) -> str:
+        with self._lock:
+            self._token = self._fetch_token(new_chat="1")
+            return self._token
+
+    def get_token(self, force_new: bool = False) -> str:
+        with self._lock:
+            if self._token is None:
+                self._token = self._fetch_token(new_chat="1")
+            elif force_new:
+                self._token = self._fetch_token(new_chat="1")
+            return self._token
+
+    def ask(self, question: str, _retried: bool = False) -> str:
+        token = self.get_token()
+        resp = requests.post(
+            NYLA_ASK_URL,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={"question": question},
+            timeout=30,
+        )
+        if resp.status_code == 401 and not _retried:
+            self.get_token(force_new=True)
+            return self.ask(question, _retried=True)
+        resp.raise_for_status()
+        payload = resp.json()
+        if not payload.get("success"):
+            raise RuntimeError(payload.get("message") or "Nyla API returned an error")
+        return payload["data"]["answer"]
+
+
+nyla_client = NylaClient()
+
+
+# ──────────────────────────────────────────────
 #  WAKE WORD
 # ──────────────────────────────────────────────
 
@@ -712,70 +790,49 @@ def is_wake_word(text: str) -> bool:
 
 def stream_ai_reply_and_speak(user_text: str, lang: str) -> str:
     """
-    Streams the LLM reply and speaks it sentence-by-sentence as it's
-    generated. Returns the full reply text (for history bookkeeping,
-    which already happened inline).
+    Gets the reply from the Nyla Report API and speaks it sentence-by-
+    sentence (Nyla's /ask endpoint is not streaming, so the full answer
+    arrives at once, then gets split and spoken the same way a cache hit
+    already was). Returns the full reply text.
     """
-    system = SYSTEM_HI if lang == "hi" else SYSTEM_EN
     lang_history = history[lang]
 
     cache_key = (lang, user_text.strip().lower())
     speaker = StreamingSpeaker(lang)
 
-    # ── Prompt cache hit: skip the LLM call entirely ─────────────
-    if cache_key in reply_cache:
-        print("   💾 cache hit — skipping LLM call")
-        cached_reply = reply_cache[cache_key]
-        lang_history.append({"role": "user", "content": user_text})
-        lang_history.append({"role": "assistant", "content": cached_reply})
-        for sentence in SENTENCE_SPLIT_RE.split(cached_reply):
-            speaker.say(sentence)
-        speaker.finish()
-        return cached_reply
+    # # ── Prompt cache hit: skip the Nyla call entirely ─────────────
+    # if cache_key in reply_cache:
+    #     print("   💾 cache hit — skipping Nyla call")
+    #     cached_reply = reply_cache[cache_key]
+    #     lang_history.append({"role": "user", "content": user_text})
+    #     lang_history.append({"role": "assistant", "content": cached_reply})
+    #     for sentence in SENTENCE_SPLIT_RE.split(cached_reply):
+    #         speaker.say(sentence)
+    #     speaker.finish()
+    #     return cached_reply
 
-    # ── Stable prefix (system + history) so OpenAI's own automatic
-    #    prompt caching can match repeated prefixes across turns ──
-    lang_history.append({"role": "user", "content": user_text})
-    messages = [{"role": "system", "content": system}, *lang_history]
+    # lang_history.append({"role": "user", "content": user_text})
 
     _mark("gpt_start")
-    stream = client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=messages,
-        max_tokens=MAX_TOKENS,
-        temperature=0.7,
-        stream=True,
-    )
+    try:
+        full_reply = nyla_client.ask(user_text)
+    except Exception:
+        speaker.finish()
+        raise
+    # Nyla answers in one shot (no token stream), so first-token and
+    # first-sentence land together — kept as separate marks purely so
+    # print_turn_timings() keeps working unchanged.
+    _mark("gpt_first_token")
+    _mark("first_sentence")
 
-    buffer = ""
-    full_reply = ""
-
-    for chunk in stream:
-        delta = chunk.choices[0].delta.content or ""
-        if not delta:                     # feature 4 — skip empty deltas
-            continue
-        _mark("gpt_first_token")
-        buffer += delta
-        full_reply += delta
-
-        parts = SENTENCE_SPLIT_RE.split(buffer)
-        if len(parts) > 1:
-            _mark("first_sentence")
-            for sentence in parts[:-1]:
-                speaker.say(sentence)
-            buffer = parts[-1]
-
-    if buffer.strip():
-        _mark("first_sentence")   # covers single-sentence replies too
-        speaker.say(buffer)
-
-    speaker.finish()
-
-    full_reply = full_reply.strip()
+    full_reply = (full_reply or "").strip()
     if full_reply:                        # feature 4 — don't cache/store empties
+        for sentence in SENTENCE_SPLIT_RE.split(full_reply):
+            speaker.say(sentence)
         lang_history.append({"role": "assistant", "content": full_reply})
         reply_cache[cache_key] = full_reply
 
+    speaker.finish()
     return full_reply
 
 
@@ -803,6 +860,14 @@ def print_banner():
 
 def main():
     print_banner()
+
+    print("   🔐 Authenticating with Nyla (auth-robot)...")
+    try:
+        nyla_client.authenticate()
+        print("   ✅ Nyla session ready.\n")
+    except Exception as e:
+        handle_error(e, "Nyla authentication")
+        return
 
     state = State.LISTENING
     lang  = "hi"
