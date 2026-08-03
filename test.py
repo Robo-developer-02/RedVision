@@ -98,13 +98,13 @@ CHANNELS    = 1
 MAX_TOKENS  = 200
 
 # ── VAD tuning ─────────────────────────────────────────────
-ENERGY_THRESHOLD     = 0.10
+ENERGY_THRESHOLD     = 0.18
 # Was 1.2s. Every turn pays this in full before STT even starts, so it is
 # one of the biggest single latency knobs. 0.8s is a common sweet spot for
 # conversational assistants -- if users start getting cut off mid-thought,
 # raise it back up in 0.1s steps; if RoboBot still feels slow to react and
 # nobody is getting cut off, it can go a little lower (try 0.6-0.7s).
-SILENCE_AFTER_SPEECH = 1.0
+SILENCE_AFTER_SPEECH = 1.2
 # Was 0.45s. Governs how quickly a mid-turn chunk gets shipped to Whisper
 # in the background. Lower = STT gets a head start sooner, at the cost of
 # slightly choppier segment boundaries. 0.35s tested fine; recalibrate if
@@ -115,7 +115,7 @@ SENTENCE_PAUSE       = 0.35
 # background transcription for the bulk of the utterance has a head
 # start, so we don't need to wait as long to conclude the turn -- only
 # the short trailing remainder is still on the critical path.
-SILENCE_AFTER_SPEECH_FOLLOWUP = 0.6
+SILENCE_AFTER_SPEECH_FOLLOWUP = 1.0
 PRE_ROLL_CHUNKS      = 6
 MIN_SPEECH_SECS      = 0.5
 CHUNK_SECS           = 0.1
