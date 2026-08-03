@@ -121,7 +121,7 @@ PRE_ROLL_CHUNKS      = 6
 MIN_SPEECH_SECS      = 0.5
 CHUNK_SECS           = 0.1
 
-IDLE_TIMEOUT      = 10.0
+IDLE_TIMEOUT      = 18.0
 IDLE_POLL_TIMEOUT = 30.0
 
 # Pause after the bot finishes speaking, before the mic reopens. Without
@@ -1034,17 +1034,15 @@ def _timed_stop_and_announce(duration: int, label_hi: str, label_en: str,
                else f"Moved {label_en} for {duration} seconds.")
         speak_blocking(msg, lang=lang)
 
-
 def _turn_and_announce(turn_cmd: str, pulse: int, label_hi: str, label_en: str,
                         lang: str, my_flag: threading.Event):
     send_move_command(turn_cmd)
     time.sleep(pulse)
     if not my_flag.is_set():
         send_move_command('x')
-        msg = (f"Maine {label_hi} taraf {pulse} second ke liye mud liya." if lang == "hi"
-               else f"Turned {label_en} for {pulse} seconds.")
+        msg = (f"Maine {label_hi} taraf mud liya." if lang == "hi"
+               else f"Turned {label_en}.")
         speak_blocking(msg, lang=lang)
-
 
 def try_handle_movement_command(text: str, lang: str) -> bool:
     """
