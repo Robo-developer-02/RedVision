@@ -27,8 +27,11 @@ def show_menu():
     print("=================================")
     print("0 -> Chatbot")
     print("1 -> Audio Player")
-    print("2 -> Raspberry Pi Terminal")
-    print("3 -> Exit")
+    
+    print("2 -> Exit (You will enter the Raspberry Pi Terminal)")
+    print("IF YOU HAVE ENTERED THE TERMINAL , paste these commands in order -")
+    print("cd Desktop/CHATBOT/")
+    print("python launcher.py")
 # --------------------------------------------------------------------
 # Main loop: show the menu, run the chosen program, wait for it to
 # finish, then show the menu again. Repeats until the user exits.
