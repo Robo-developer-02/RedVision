@@ -53,6 +53,7 @@ import socket
 import hashlib
 import threading
 import subprocess
+import difflib
 from enum import Enum
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -148,6 +149,15 @@ PRINT_LATENCY_TIMINGS = True
 STREAM_TTS_PLAYBACK = True
 
 WAKE_WORDS = ["hello", "hey"]
+
+# Common STT mishearings/variants of the wake words, in both scripts.
+# "hello" often comes back as "hallo"/"halo"/"helo"/"hullo"; "hey" as
+# "hay"/"heya"; and in Hindi it can be transcribed in Devanagari as any
+# of these. Checked as exact/near-exact word matches (see is_wake_word).
+WAKE_WORDS_EN_VARIANTS = ["hello", "hallo", "halo", "helo", "hullo", "hey", "hay", "heya"]
+WAKE_WORDS_HI_VARIANTS = ["हैलो", "हेलो", "हलो", "हाय", "हे"]
+
+_WAKE_WORD_PUNCT_RE = re.compile(r"[^\w\u0900-\u097F\s]", re.UNICODE)
 
 # NOTE: SYSTEM_EN / SYSTEM_HI / MAX_TOKENS are no longer used now that
 # Nyla handles all chat replies (Nyla has its own persona/behavior
@@ -825,8 +835,23 @@ nyla_client = NylaClient()
 # ──────────────────────────────────────────────
 
 def is_wake_word(text: str) -> bool:
-    lower = text.lower().strip()
-    return any(w in lower for w in WAKE_WORDS)
+    """
+    True if any word in `text` is close enough to a wake word. Checks
+    known English/Hindi mishearing variants exactly, then falls back to
+    a fuzzy character-similarity match against "hello"/"hey" for
+    anything not already listed (e.g. a slightly different mis-transcription).
+    """
+    cleaned = _WAKE_WORD_PUNCT_RE.sub("", text.lower()).strip()
+    if not cleaned:
+        return False
+
+    for word in cleaned.split():
+        if word in WAKE_WORDS_EN_VARIANTS or word in WAKE_WORDS_HI_VARIANTS:
+            return True
+        for target in WAKE_WORDS:
+            if difflib.SequenceMatcher(None, word, target).ratio() >= 0.75:
+                return True
+    return False
 
 
 # ──────────────────────────────────────────────
