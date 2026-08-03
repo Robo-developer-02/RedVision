@@ -122,6 +122,14 @@ CHUNK_SECS           = 0.1
 IDLE_TIMEOUT      = 10.0
 IDLE_POLL_TIMEOUT = 30.0
 
+# Pause after the bot finishes speaking, before the mic reopens. Without
+# this, on speaker+mic setups (no headset / no echo cancellation) the
+# tail of the bot's own voice is still audible in the room the instant
+# capture_and_transcribe() opens a new InputStream, so it gets picked up
+# and transcribed as if it were the user talking — causing the bot to
+# seemingly "hear itself" or respond to garbage text right after it speaks.
+POST_SPEECH_COOLDOWN = 0.1
+
 # ── Perf / debug toggles ───────────────────────────────────
 # Print the per-turn latency breakdown (Speech End → STT → GPT First
 # Token → Sentence Complete → TTS Start → Playback Started → Total).
@@ -276,6 +284,10 @@ pygame.mixer.init()
 stt_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="stt")
 tts_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tts")
 
+# Set on Ctrl+C so any thread still inside play()'s polling loop bails out
+# immediately instead of racing pygame's own shutdown/atexit teardown.
+_shutting_down = threading.Event()
+
 
 # ──────────────────────────────────────────────
 #  CONNECTIVITY / ERROR HANDLING  (features 5, 6, 7)
@@ -368,11 +380,21 @@ def synthesize(text: str, voice: str) -> str:
 
 
 def play(path: str):
-    pygame.mixer.music.load(path)
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        pygame.time.wait(50)
-    pygame.mixer.music.unload()
+    if _shutting_down.is_set():
+        return
+    try:
+        pygame.mixer.music.load(path)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            if _shutting_down.is_set():
+                pygame.mixer.music.stop()
+                break
+            pygame.time.wait(50)
+        pygame.mixer.music.unload()
+    except pygame.error:
+        # Mixer was already torn down (e.g. interpreter exiting right after
+        # Ctrl+C) — nothing left to play, so just stop quietly.
+        pass
 
 
 # ──────────────────────────────────────────────
@@ -874,12 +896,13 @@ def main():
 
     try:
         speak_blocking(
-            "Hello, mein RoboBot hoon . main aapki kese madad kar sakta hoon. "
-            "Krapya apna sawaal poochhiye .",
+            "Hello, i am Naaila ,"
+            "You can talk to me.",
             lang="hi",
         )
     except Exception as e:
         handle_error(e, "opening greeting")
+    time.sleep(POST_SPEECH_COOLDOWN)
 
     try:
         while True:
@@ -904,6 +927,7 @@ def main():
                         speak_blocking("Haan, mein sun raha hoon. Aap apna sawaal poochhiye.", lang="hi")
                     except Exception as e:
                         handle_error(e, "wake acknowledgement")
+                    time.sleep(POST_SPEECH_COOLDOWN)
                 else:
                     print("   Not a wake word — staying idle.")
                 continue
@@ -927,6 +951,7 @@ def main():
                         )
                     except Exception as e:
                         handle_error(e, "idle announcement")
+                    time.sleep(POST_SPEECH_COOLDOWN)
                     continue
 
                 user_text = user_text.strip()
@@ -949,13 +974,16 @@ def main():
                     continue
                 if PRINT_LATENCY_TIMINGS:
                     print_turn_timings()
+                time.sleep(POST_SPEECH_COOLDOWN)
                 state = State.LISTENING
                 continue
 
     except KeyboardInterrupt:
         print("\n\n👋 Shutting down...")
-        stt_executor.shutdown(wait=False, cancel_futures=True)
-        tts_executor.shutdown(wait=False, cancel_futures=True)
+        _shutting_down.set()          # tells any in-flight play() to stop now
+        stt_executor.shutdown(wait=True, cancel_futures=True)
+        tts_executor.shutdown(wait=True, cancel_futures=True)
+        pygame.mixer.quit()           # tear down explicitly, before atexit does
 
 
 if __name__ == "__main__":
