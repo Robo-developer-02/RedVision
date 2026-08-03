@@ -569,23 +569,46 @@ def transcribe_segment(audio: np.ndarray) -> Tuple[str, str]:
     Writes the WAV to an in-memory buffer instead of a temp file on disk —
     avoids a file create + write + unlink round trip (and SD-card wear on
     a Raspberry Pi) on every segment, background or trailing.
+
+    Only Hindi and English are ever returned. Whisper's language
+    auto-detection sometimes mistakes Hindi speech for Urdu (they're the
+    same spoken language, different script) — and critically, that
+    changes which *script* Whisper transcribes into (Perso-Arabic instead
+    of Devanagari), not just the language tag. So if anything other than
+    hi/en comes back, the same audio is re-decoded with Hindi forced,
+    which fixes the script at the source instead of relabeling bad text.
     """
-    buf = io.BytesIO()
-    sf.write(buf, audio, SAMPLE_RATE, format="WAV")
-    buf.seek(0)
-    buf.name = "segment.wav"   # SDK uses this for the upload filename
+    def _call(language: Optional[str] = None):
+        buf = io.BytesIO()
+        sf.write(buf, audio, SAMPLE_RATE, format="WAV")
+        buf.seek(0)
+        buf.name = "segment.wav"   # SDK uses this for the upload filename
+        kwargs = dict(model=STT_MODEL, file=buf, response_format="verbose_json")
+        if language:
+            kwargs["language"] = language
+        return client.audio.transcriptions.create(**kwargs)
 
-    result = client.audio.transcriptions.create(
-        model=STT_MODEL,
-        file=buf,
-        response_format="verbose_json",
-    )
-
+    result = _call()
     text = (result.text or "").strip()
     lang = (result.language or "en").strip().lower()
-    if lang == "ur":
+
+    # Whisper's `language` tag and the actual script it writes in aren't
+    # reliably in sync — it can report "hi" while still producing
+    # Perso-Arabic (Urdu) characters. So check the real text, not just
+    # the tag, before deciding whether a forced Hindi re-decode is needed.
+    has_urdu_script = any(0x0600 <= ord(ch) <= 0x06FF for ch in text)
+
+    if lang == "ur" or has_urdu_script:
+        # Hindi speech misheard/miswritten as Urdu — same spoken language,
+        # wrong script. Re-decode forcing Hindi so the text comes back in
+        # Devanagari.
+        result = _call(language="hi")
+        text = (result.text or "").strip()
         lang = "hi"
-    if lang not in ("hi", "en"):
+    elif lang not in ("hi", "en"):
+        # Anything else (including English misheard as some unrelated
+        # language on a short/noisy segment) — don't force Hindi, just
+        # fall back to English as before.
         lang = "en"
 
     for ch in text:
