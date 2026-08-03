@@ -54,11 +54,7 @@ try:
             print("Returning to Raspberry Pi terminal...")
             break
 
-        elif choice == "3":
-            # Exit completely
-            print("Goodbye!")
-            sys.exit(0)
-
+        
         else:
             print("Invalid choice.")
             input("Press Enter to continue...")
